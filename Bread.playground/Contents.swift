@@ -1,90 +1,104 @@
-import UIKit
-import PlaygroundSupport
 import Foundation
 
 public struct Bread {
-    public enum BreadType: UInt32 {
-        case small = 1
-        case medium
-        case big
+  public enum BreadType: UInt32 {
+    case small = 1
+    case medium
+    case big
+  }
+  
+  public let breadType: BreadType
+  public static func make() -> Bread {
+    guard let breadType = Bread.BreadType(rawValue: UInt32(arc4random_uniform(3) + 1)) else {
+      fatalError("Incorrect random value")
     }
     
-    public let breadType: BreadType
-    
-    public static func make() -> Bread {
-        guard let breadType = Bread.BreadType(rawValue: UInt32(arc4random_uniform(3) + 1)) else {
-            fatalError("Incorrect random value")
-        }
-        
-        return Bread(breadType: breadType)
-    }
-    
-    public func bake() {
-        let bakeTime = breadType.rawValue
-        sleep(UInt32(bakeTime))
-    }
+    return Bread(breadType: breadType)
+  }
+  
+  public func bake() {
+    let bakeTime = breadType.rawValue
+    sleep(UInt32(bakeTime))
+  }
 }
 
 //MARK: Основной код
-PlaygroundPage.current.needsIndefiniteExecution = true
-
 /// Хранилище хлеба
-struct StorageDevice {
-    private(set) var array : [Bread] = []
+public struct BreadStorage {
+    private(set) var arrayStorage = [Bread]()
     
-    mutating func putNew(bread: Bread) {
-        self.array.append(bread)
-        print("Добавлена заготовка \(array.last!.breadType) на складе: \(array.count) шт.")
+    let condition = NSCondition()
+    let mutex = NSRecursiveLock()
+    var isOpen = false
+    
+    var count: Int {
+       storageBreadArray.arrayStorage.count
+     }
+    
+    
+    mutating func push(_ bread: Bread) {
+        isOpen = true
+        ///блокируем поток
+        mutex.lock()
+        arrayStorage.append(bread)
+        print("Добавлена заготовка \(arrayStorage.last!.breadType) на складе \(arrayStorage.count) шт.")
+        isOpen = false
+        /// сигнилизируем что поток будет освобожден
+        condition.signal()
+        /// разблокируем поток
+        mutex.unlock()
     }
     
-    mutating func getNew() -> Bread? {
-        return array.count > 0 ? array.removeLast() : nil
-    }
-}
-
-var storageDevice = StorageDevice()
-var isCreatedThreadWork = true
-var isWorkerThreadWork = true
-let condition = NSCondition()
-
-class CreateThread : Thread {
-    override func main() {
-        for _ in 0...9 {
-            let newBread = Bread.make()
-            condition.lock()
-            storageDevice.putNew(bread: newBread)
-            condition.unlock()
-            if !isWorkerThreadWork {
-                print("Выпекаем хлеб, осталось заготовок: \(storageDevice.array.count)")
-                condition.signal()
-            }
-            Darwin.sleep(2)
+    mutating func pop() -> Bread? {
+        /// если поток закрыт или пустой, ждем
+        if isOpen || arrayStorage.isEmpty {
+            condition.wait()
         }
-        isCreatedThreadWork = false
-    }
-}
-
-class WorkThread : Thread {
-    override func main() {
         
-        while isCreatedThreadWork {
-            if storageDevice.array.count == 0 {
-                isWorkerThreadWork = false
-                condition.wait()
-            }
-            while storageDevice.array.count > 0 {
-                isWorkerThreadWork = true
-                storageDevice.getNew()?.bake()
-            }
-        }
-        print("Процесс завершен в хранилище осталось: \(storageDevice.array.count) заготовок")
+        mutex.lock()
+        let bread = !arrayStorage.isEmpty ? arrayStorage.removeLast() : nil
+        mutex.unlock()
+        return bread
     }
+}
+
+var storageBreadArray = BreadStorage()
+
+//MARK: Продолжающий поток
+final class GeneratingThread: Thread {
+
+    override func main() {
+        let timer = Timer(timeInterval: 2,
+                          repeats: true) { _ in
+                            guard !self.isCancelled else { return }
+                            /// для каждого цикла создаем рандомный экземпляр хлеба
+                            let bread = Bread.make()
+                            /// кладем заготовку в хранилище
+                            storageBreadArray.push(bread)
+        }
+        RunLoop.current.add(timer, forMode: .default)
+        RunLoop.current.run()
+      }
+    }
+
+final class WorkThread: Thread {
+  
+  override func main() {
+    /// пока поток закрыт или хранилище имеет заготовки, выпекаем хлеб
+    while !isCancelled || !storageBreadArray.arrayStorage.isEmpty {
+      storageBreadArray.pop()?.bake()
+      print("Выпекаем хлеб, осталось заготовок: \(storageBreadArray.count)")
+    }
+    print("Процесс завершен в хранилище осталось: \(storageBreadArray.count) заготовок")
+  }
 }
 
 //MARK: Проверка решения
-let createThread = CreateThread()
+let breadStorage = BreadStorage()
+let generatingThread = GeneratingThread()
 let workThread = WorkThread()
-createThread.qualityOfService = .userInitiated
-workThread.qualityOfService = .background
-createThread.start()
+generatingThread.start()
 workThread.start()
+sleep(20)
+generatingThread.cancel()
+workThread.cancel()
